@@ -656,12 +656,13 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 class TradingViewSignal(BaseModel):
     action: str          # "buy", "sell", "close"
-    symbol: str          # ex: "ETHUSDT.P"
+    symbol: str          # ex: "MNQ"
     price: float
     sl: Optional[float] = None
     tp: Optional[float] = None
     tf: Optional[int] = None
     strategy: Optional[str] = None
+    token: Optional[str] = None  # token optionnel dans le body (TradingView)
 
 
 # ---------------------------------------------------------------------------
@@ -716,16 +717,20 @@ async def close_all_endpoint(request: Request, x_webhook_token: Optional[str] = 
 
 
 @app.post("/webhook/apex")
+@app.post("/webhook/apex/{url_token}")
 async def webhook_apex(
     signal: TradingViewSignal,
     background_tasks: BackgroundTasks,
+    url_token: Optional[str] = None,
     x_webhook_token: Optional[str] = Header(None),
 ):
     """
-    Reçoit un signal TradingView et exécute l'ordre correspondant.
-    Header requis : X-Webhook-Token
+    Recoit un signal TradingView et execute l ordre correspondant.
+    Token accepte : header X-Webhook-Token, URL path, ou champ body.
+    URL TradingView : /webhook/apex/jp_apex_mnq_2026
     """
-    _verify_token(x_webhook_token)
+    effective_token = x_webhook_token or url_token or signal.token
+    _verify_token(effective_token)
 
     logger.info(
         f"Signal reçu : action={signal.action} symbol={signal.symbol} "
