@@ -63,7 +63,7 @@ logger = logging.getLogger("apex_bot")
 
 TZ_PARIS = ZoneInfo("Europe/Paris")
 
-TRADOVATE_BASE_URL = "https://live.tradovate.com/v1"
+TRADOVATE_BASE_URL = "https://live-api.tradovate.com/v1"
 TRADOVATE_USERNAME = os.getenv("TRADOVATE_USERNAME", "")
 TRADOVATE_PASSWORD = os.getenv("TRADOVATE_PASSWORD", "")
 TRADOVATE_ACCOUNT_SPEC = os.getenv("TRADOVATE_ACCOUNT_SPEC", "")
