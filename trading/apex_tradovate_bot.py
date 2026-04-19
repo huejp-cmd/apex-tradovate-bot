@@ -146,6 +146,7 @@ class TradovateClient:
             self._client = httpx.AsyncClient(
                 base_url=TRADOVATE_BASE_URL,
                 timeout=30.0,
+                follow_redirects=True,
             )
         return self._client
 
