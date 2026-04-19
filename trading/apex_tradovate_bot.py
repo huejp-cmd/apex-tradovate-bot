@@ -70,6 +70,7 @@ TRADOVATE_ACCOUNT_SPEC = os.getenv("TRADOVATE_ACCOUNT_SPEC", "")
 APEX_WEBHOOK_TOKEN = os.getenv("APEX_WEBHOOK_TOKEN", "")
 CONTRACT_SYMBOL = os.getenv("CONTRACT_SYMBOL", "MNQ")
 UNIT_DOLLAR = float(os.getenv("UNIT_DOLLAR", "50"))
+DRY_RUN = os.getenv("DRY_RUN", "true").lower() in ("1", "true", "yes")
 
 # Règles Apex ($50k evaluation)
 APEX_PROFIT_TARGET = 3000.0
@@ -613,11 +614,16 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Variables d'env manquantes : {missing}")
 
     # Auth initiale
+    if DRY_RUN:
+        logger.info("=== MODE DRY_RUN ACTIVE — aucun ordre reel n'est envoye ===")
     ok = await tradovate_client.auth()
     if ok:
-        logger.info("Connexion Tradovate établie.")
+        logger.info("Connexion Tradovate etablie.")
     else:
-        logger.error("ATTENTION : Connexion Tradovate échouée au démarrage !")
+        if DRY_RUN:
+            logger.warning("Auth Tradovate echouee mais DRY_RUN=true — simulation uniquement.")
+        else:
+            logger.error("ATTENTION : Connexion Tradovate echouee au demarrage !")
 
     # Démarrer le watcher CME
     watcher_task = asyncio.create_task(cme_time_watcher())
@@ -727,8 +733,10 @@ async def webhook_apex(
     )
 
     # 1. Vérifier l'authentification
-    if not await tradovate_client.ensure_authenticated():
-        raise HTTPException(status_code=503, detail="Tradovate non authentifié.")
+    if DRY_RUN:
+        logger.info("[DRY_RUN] Signal recu — simulation (pas d'ordre reel).")
+    elif not await tradovate_client.ensure_authenticated():
+        raise HTTPException(status_code=503, detail="Tradovate non authentifie.")
 
     # 2. Vérifier les horaires CME
     if bot_state.trading_halted:
@@ -829,9 +837,16 @@ async def webhook_apex(
 async def _execute_order(
     action: str, symbol: str, qty: int, price: float, bet_usd: float
 ):
-    """Place un ordre Limit et gère le résultat Labouchere."""
+    """Place un ordre Limit et gere le resultat Labouchere."""
     async with bot_state.order_lock:
         try:
+            if DRY_RUN:
+                logger.info(f"[DRY_RUN] ORDRE SIMULE : {action} {qty}x {symbol} @ {price:.2f} (bet=${bet_usd:.0f})")
+                bot_state.current_position_qty = qty if action == "Buy" else -qty
+                bot_state.current_position_symbol = symbol
+                bot_state.current_position_price = price
+                return
+
             result = await tradovate_client.place_order(
                 action=action,
                 symbol=symbol,
@@ -839,25 +854,31 @@ async def _execute_order(
                 price=price,
             )
             if result:
-                logger.info(f"Ordre exécuté : {action} {qty} {symbol} @ {price}")
-                # Note : le PnL réel est connu à la fermeture du trade.
-                # Ici on enregistre juste que l'ordre est passé.
-                # La mise à jour Labouchere et PnL se fait via /close_all ou webhook CLOSE.
+                logger.info(f"Ordre execute : {action} {qty} {symbol} @ {price}")
                 bot_state.current_position_qty = qty if action == "Buy" else -qty
                 bot_state.current_position_symbol = symbol
             else:
-                logger.error("Ordre non exécuté.")
+                logger.error("Ordre non execute.")
         except Exception as e:
             logger.error(f"Erreur _execute_order : {e}\n{traceback.format_exc()}")
 
 
 async def _execute_close(reason: str = "Close signal"):
-    """Ferme toutes les positions et met à jour le Labouchere."""
+    """Ferme toutes les positions et met a jour le Labouchere."""
     async with bot_state.order_lock:
         try:
+            if DRY_RUN:
+                if bot_state.current_position_qty != 0:
+                    logger.info(f"[DRY_RUN] CLOTURE SIMULEE : {bot_state.current_position_symbol} qty={bot_state.current_position_qty} raison={reason}")
+                else:
+                    logger.info("[DRY_RUN] Pas de position ouverte a fermer.")
+                bot_state.current_position_qty = 0
+                bot_state.current_position_symbol = None
+                return
+
             positions = await tradovate_client.get_positions()
             if not positions:
-                logger.info("Aucune position à fermer.")
+                logger.info("Aucune position a fermer.")
                 return
 
             for pos in positions:
@@ -869,26 +890,22 @@ async def _execute_close(reason: str = "Close signal"):
                 action = "Sell" if net_pos > 0 else "Buy"
                 qty = abs(net_pos)
 
-                # Calculer PnL approximatif (à partir du prix de clôture si disponible)
-                # Tradovate fournit openPL sur la position
                 open_pl = pos.get("openPL", 0.0)
                 trade_pnl = float(open_pl) if open_pl else 0.0
 
                 result = await tradovate_client.place_market_order(action, symbol, qty)
                 if result:
-                    logger.info(f"Position fermée : {symbol} pnl≈{trade_pnl:.2f}$")
+                    logger.info(f"Position fermee : {symbol} pnl={trade_pnl:.2f}$")
 
-                    # Mise à jour Labouchere
                     if LAB_AVAILABLE:
                         if trade_pnl >= 0:
                             record_win(trade_pnl)
                         else:
                             record_loss(abs(trade_pnl))
 
-                    # Mise à jour PnL Apex
                     apex_risk.update_pnl(trade_pnl)
                 else:
-                    logger.error(f"Échec fermeture position {symbol}")
+                    logger.error(f"Echec fermeture position {symbol}")
 
             bot_state.current_position_qty = 0
             bot_state.current_position_symbol = None
