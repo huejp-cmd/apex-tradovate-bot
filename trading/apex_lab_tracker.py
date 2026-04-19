@@ -31,8 +31,8 @@ STATE_FILE   = _resolve_path("apex_lab_state.json")
 HISTORY_FILE = _resolve_path("apex_lab_history.json")
 
 UNIT_VALUE   = 1.0    # valeurs de sequence en $ directs
-SPLIT_BET    = 300    # seuil split WIN -> [100,100,100] si mise >= $300
-INIT_SEQ     = [50, 50, 50, 50]  # sequence depart : mise initiale = 50+50 = $100
+SPLIT_BET    = 150    # seuil split WIN -> [50,50,50] si mise >= $150
+INIT_SEQ     = [25, 25, 25, 25]  # sequence depart : mise initiale = 25+25 = $50
 
 _lock = threading.Lock()
 
@@ -114,8 +114,8 @@ def record_result(side: str, coin: str, entry: float, exit_price: float,
         if result == "WIN":
             state["wins"] += 1
             if bet >= SPLIT_BET:
-                state["sequence"].extend([100, 100, 100])
-                added = [100, 100, 100]
+                state["sequence"].extend([50, 50, 50])
+                added = [50, 50, 50]
             else:
                 state["sequence"].append(bet)
                 added = [bet]
