@@ -168,6 +168,28 @@ def record_result(side: str, coin: str, entry: float, exit_price: float,
 
 CYCLE_RISK_USD = 200.0  # Fixe : 2 pertes x $100 pour vider [1,1,1,1] et reset
 
+# ============================================================
+#  WRAPPERS compatibles apex_tradovate_bot.py
+# ============================================================
+
+def get_current_bet() -> float:
+    """Retourne la mise courante en dollars."""
+    with _lock:
+        state = _load_state()
+        return float(_get_bet(state["sequence"]))
+
+def get_state() -> dict:
+    """Alias de get_current_state()."""
+    return get_current_state()
+
+def record_win(pnl: float) -> None:
+    """Enregistre un gain (wrapper simplifie)."""
+    record_result("bot", "MNQ", 0.0, 0.0, "WIN", pnl)
+
+def record_loss(pnl: float) -> None:
+    """Enregistre une perte (wrapper simplifie)."""
+    record_result("bot", "MNQ", 0.0, 0.0, "LOSS", pnl)
+
 def get_current_state() -> dict:
     with _lock:
         state = _load_state()
