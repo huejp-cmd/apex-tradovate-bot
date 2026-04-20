@@ -171,7 +171,7 @@ class TradovateClient:
             "password": TRADOVATE_PASSWORD,
             "appId": "Sample App",
             "appVersion": "1.0",
-            "cid": 0,
+            "cid": int(os.getenv("TRADOVATE_CID", "8")),
             "sec": "",
         }
         try:
