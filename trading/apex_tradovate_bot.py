@@ -63,9 +63,10 @@ logger = logging.getLogger("apex_bot")
 
 TZ_PARIS = ZoneInfo("Europe/Paris")
 
-TRADOVATE_BASE_URL = os.getenv("TRADOVATE_BASE_URL", "https://demo-api.tradovate.com/v1")
+TRADOVATE_BASE_URL = os.getenv("TRADOVATE_BASE_URL", "https://live.tradovateapi.com/v1")
 TRADOVATE_USERNAME = os.getenv("TRADOVATE_USERNAME", "")
 TRADOVATE_PASSWORD = os.getenv("TRADOVATE_PASSWORD", "")
+TRADOVATE_ENV = os.getenv("TRADOVATE_ENV", "demo")  # "demo" pour eval Apex, "live" pour compte réel
 TRADOVATE_ACCOUNT_SPEC = os.getenv("TRADOVATE_ACCOUNT_SPEC", "")
 APEX_WEBHOOK_TOKEN = os.getenv("APEX_WEBHOOK_TOKEN", "")
 CONTRACT_SYMBOL = os.getenv("CONTRACT_SYMBOL", "MNQ")
@@ -160,6 +161,14 @@ class TradovateClient:
             raise RuntimeError("Non authentifié — appeler auth() d'abord.")
         return {"Authorization": f"Bearer {self.state.access_token}"}
 
+    @staticmethod
+    def _encode_password(password: str) -> str:
+        """Encode le mot de passe selon le schéma Tradovate web (split-reverse-base64)."""
+        import base64
+        mid = len(password) // 2
+        encoded = password[:mid][::-1] + password[mid:][::-1]
+        return base64.b64encode(encoded.encode()).decode()
+
     async def auth(self) -> bool:
         """Authentification et récupération du token."""
         if not TRADOVATE_USERNAME or not TRADOVATE_PASSWORD:
@@ -168,11 +177,15 @@ class TradovateClient:
 
         payload = {
             "name": TRADOVATE_USERNAME,
-            "password": TRADOVATE_PASSWORD,
-            "appId": "Sample App",
-            "appVersion": "1.0",
-            "cid": int(os.getenv("TRADOVATE_CID", "8")),
-            "sec": "",
+            "password": self._encode_password(TRADOVATE_PASSWORD),
+            "environment": TRADOVATE_ENV,
+            "appId": "tradovate_trader(web)",
+            "appVersion": "3.260417.0",
+            "deviceId": "e09c1bb8-6a34-43a8-b2b3-daeeec54750b",
+            "cid": "1",
+            "chl": "195672814781",
+            "sec": "9face149323298c9b5e2e6dbd15d4cd3e7680587c12b22ec964a85b413c2a0e0",
+            "enc": True,
         }
         try:
             client = await self._get_client()
