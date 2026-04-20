@@ -172,9 +172,10 @@ class TradovateClient:
 
     async def auth(self) -> bool:
         """Authentification et récupération du token."""
-        # Mode token pré-fourni (refresh via script local)
-        if TRADOVATE_ACCESS_TOKEN:
-            self.state.access_token = TRADOVATE_ACCESS_TOKEN
+        # Mode token pré-fourni (refresh via script local) — lire dynamiquement l'env
+        env_token = os.getenv("TRADOVATE_ACCESS_TOKEN", "") or TRADOVATE_ACCESS_TOKEN
+        if env_token:
+            self.state.access_token = env_token
             self.state.last_auth_time = datetime.now(timezone.utc)
             logger.info("Auth via TRADOVATE_ACCESS_TOKEN pré-fourni ✅")
             await self._load_account()
@@ -402,12 +403,14 @@ class TradovateClient:
                 await self.cancel_order(order["id"])
 
     async def ensure_authenticated(self) -> bool:
-        """Vérifie et renouvelle l'authentification si nécessaire (> 20 min)."""
+        """Vérifie et renouvelle l'authentification si nécessaire (> 80 min).
+        Le cron refresh tourne toutes les 90 min — on laisse de la marge.
+        """
         if not self.state.access_token or not self.state.last_auth_time:
             return await self.auth()
         delta = (datetime.now(timezone.utc) - self.state.last_auth_time).total_seconds()
-        if delta > 1200:  # 20 minutes
-            logger.info("Token expiré — re-authentification...")
+        if delta > 4800:  # 80 minutes (< 90 min cron refresh)
+            logger.info("Token proche expiration — re-authentification...")
             return await self.auth()
         return True
 
