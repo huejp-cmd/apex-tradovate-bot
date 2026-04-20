@@ -67,6 +67,7 @@ TRADOVATE_BASE_URL = os.getenv("TRADOVATE_BASE_URL", "https://live.tradovateapi.
 TRADOVATE_USERNAME = os.getenv("TRADOVATE_USERNAME", "")
 TRADOVATE_PASSWORD = os.getenv("TRADOVATE_PASSWORD", "")
 TRADOVATE_ENV = os.getenv("TRADOVATE_ENV", "demo")  # "demo" pour eval Apex, "live" pour compte réel
+TRADOVATE_ACCESS_TOKEN = os.getenv("TRADOVATE_ACCESS_TOKEN", "")  # Token pré-fourni (refresh automatique)
 TRADOVATE_ACCOUNT_SPEC = os.getenv("TRADOVATE_ACCOUNT_SPEC", "")
 APEX_WEBHOOK_TOKEN = os.getenv("APEX_WEBHOOK_TOKEN", "")
 CONTRACT_SYMBOL = os.getenv("CONTRACT_SYMBOL", "MNQ")
@@ -171,6 +172,14 @@ class TradovateClient:
 
     async def auth(self) -> bool:
         """Authentification et récupération du token."""
+        # Mode token pré-fourni (refresh via script local)
+        if TRADOVATE_ACCESS_TOKEN:
+            self.state.access_token = TRADOVATE_ACCESS_TOKEN
+            self.state.last_auth_time = datetime.now(timezone.utc)
+            logger.info("Auth via TRADOVATE_ACCESS_TOKEN pré-fourni ✅")
+            await self._load_account()
+            return True
+
         if not TRADOVATE_USERNAME or not TRADOVATE_PASSWORD:
             logger.error("TRADOVATE_USERNAME / TRADOVATE_PASSWORD non définis.")
             return False
@@ -719,6 +728,22 @@ async def status():
         "positions": positions,
         "time_paris": datetime.now(TZ_PARIS).strftime("%Y-%m-%d %H:%M:%S %Z"),
     }
+
+
+@app.post("/refresh_token")
+async def refresh_token_endpoint(request: Request, x_webhook_token: Optional[str] = Header(None)):
+    """Reçoit un nouveau token Tradovate depuis le script local de refresh."""
+    _verify_token(x_webhook_token)
+    body = await request.json()
+    new_token = body.get("access_token")
+    if not new_token:
+        raise HTTPException(status_code=400, detail="access_token requis")
+    bot_state.access_token = new_token
+    bot_state.last_auth_time = datetime.now(timezone.utc)
+    # Recharger le compte
+    await tradovate_client._load_account()
+    logger.info(f"Token rafraîchi via endpoint — account_id={bot_state.account_id}")
+    return {"status": "ok", "authenticated": True, "account_id": bot_state.account_id}
 
 
 @app.post("/close_all")
