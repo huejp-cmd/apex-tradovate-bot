@@ -809,7 +809,8 @@ async def webhook_apex(
     if action not in ("buy", "sell"):
         raise HTTPException(status_code=400, detail=f"Action inconnue : {action}")
 
-    if signal.sl is None:
+    # SL optionnel pour MNQ (SL fixe interne = MNQ_SL_POINTS x $2/point)
+    if signal.sl is None and "MNQ" not in CONTRACT_SYMBOL.upper():
         raise HTTPException(
             status_code=400,
             detail="SL (stop-loss) requis pour calculer la taille de position."
