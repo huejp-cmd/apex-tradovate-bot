@@ -171,58 +171,32 @@ class TradovateClient:
         return base64.b64encode(encoded.encode()).decode()
 
     async def auth(self) -> bool:
-        """Authentification et récupération du token."""
-        # Mode token pré-fourni (refresh via script local) — lire dynamiquement l'env
-        env_token = os.getenv("TRADOVATE_ACCESS_TOKEN", "") or TRADOVATE_ACCESS_TOKEN
+        """Authentification via token pré-fourni uniquement.
+        Le token est poussé par refresh_token.py toutes les 90 min
+        via l'endpoint /refresh_token (qui définit bot_state.access_token)
+        ou via TRADOVATE_ACCESS_TOKEN dans les variables Railway.
+        La méthode username/password est désactivée (API Tradovate instable).
+        """
+        # 1. Utiliser le token déjà en mémoire si présent (défini par /refresh_token)
+        if self.state.access_token:
+            self.state.last_auth_time = datetime.now(timezone.utc)
+            logger.info("Auth OK — token en mémoire réutilisé ✅")
+            if not self.state.account_id:
+                await self._load_account()
+            return True
+
+        # 2. Lire depuis env Railway (au démarrage ou après redéploiement)
+        env_token = os.getenv("TRADOVATE_ACCESS_TOKEN", "")
         if env_token:
             self.state.access_token = env_token
             self.state.last_auth_time = datetime.now(timezone.utc)
-            logger.info("Auth via TRADOVATE_ACCESS_TOKEN pré-fourni ✅")
+            logger.info("Auth via TRADOVATE_ACCESS_TOKEN env ✅")
             await self._load_account()
             return True
 
-        if not TRADOVATE_USERNAME or not TRADOVATE_PASSWORD:
-            logger.error("TRADOVATE_USERNAME / TRADOVATE_PASSWORD non définis.")
-            return False
-
-        payload = {
-            "name": TRADOVATE_USERNAME,
-            "password": self._encode_password(TRADOVATE_PASSWORD),
-            "environment": TRADOVATE_ENV,
-            "appId": "tradovate_trader(web)",
-            "appVersion": "3.260417.0",
-            "deviceId": "e09c1bb8-6a34-43a8-b2b3-daeeec54750b",
-            "cid": "1",
-            "chl": "195672814781",
-            "sec": "9face149323298c9b5e2e6dbd15d4cd3e7680587c12b22ec964a85b413c2a0e0",
-            "enc": True,
-        }
-        try:
-            client = await self._get_client()
-            resp = await client.post("/auth/accesstokenrequest", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-
-            if "errorText" in data:
-                logger.error(f"Auth Tradovate échouée : {data['errorText']}")
-                return False
-
-            self.state.access_token = data.get("accessToken")
-            self.state.md_access_token = data.get("mdAccessToken")
-            self.state.user_id = data.get("userId")
-            self.state.last_auth_time = datetime.now(timezone.utc)
-            logger.info(f"Auth Tradovate OK — userId={self.state.user_id}")
-
-            # Récupérer le compte
-            await self._load_account()
-            return True
-
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error auth : {e.response.status_code} — {e.response.text}")
-            return False
-        except Exception as e:
-            logger.error(f"Erreur auth : {e}")
-            return False
+        # 3. Pas de token disponible — attendre le prochain refresh cron (90 min)
+        logger.warning("Aucun token Tradovate disponible — attente du refresh cron (90 min).")
+        return False
 
     async def _load_account(self):
         """Charge les infos du compte principal."""
