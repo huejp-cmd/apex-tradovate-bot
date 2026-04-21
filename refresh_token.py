@@ -52,11 +52,7 @@ async def get_token():
 
 def push_to_railway(token: str):
     import urllib.request
-    query = """
-    mutation variableCollectionUpsert($input: VariableCollectionUpsertInput!) {
-        variableCollectionUpsert(input: $input)
-    }
-    """
+    query = "mutation variableCollectionUpsert($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }"
     variables = {
         "input": {
             "projectId": PROJECT_ID,
@@ -71,7 +67,8 @@ def push_to_railway(token: str):
         data=body,
         headers={
             "Authorization": f"Bearer {RAILWAY_TOKEN}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": "apex-bot-refresh/1.0"
         }
     )
     with urllib.request.urlopen(req) as r:

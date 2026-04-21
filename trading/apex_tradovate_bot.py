@@ -30,6 +30,45 @@ from pydantic import BaseModel
 from zoneinfo import ZoneInfo
 
 # ---------------------------------------------------------------------------
+# ── Piliers techniques (2026-04-21) ─────────────────────────────────────────
+# Pilier 1 : Persistance JSON/Redis
+try:
+    from state_manager import state_manager
+    PILIER_PERSISTANCE = True
+except ImportError:
+    PILIER_PERSISTANCE = False
+    logging.warning("state_manager.py introuvable — persistance désactivée.")
+    class _FallbackSM:
+        def save(self, *a, **kw): pass
+        def load(self): return {}
+        def update(self, **kw): pass
+        def clear(self): pass
+    state_manager = _FallbackSM()
+
+# Pilier 4 : Notifications téléphone
+try:
+    from notifier import notify, notify_trade_open, notify_trade_close, notify_halt, notify_low_volatility
+    PILIER_NOTIFIER = True
+except ImportError:
+    PILIER_NOTIFIER = False
+    logging.warning("notifier.py introuvable — notifications désactivées.")
+    async def notify(msg, urgent=False): logging.info(f"[NOTIFY] {msg}")
+    async def notify_trade_open(*a, **kw): pass
+    async def notify_trade_close(*a, **kw): pass
+    async def notify_halt(*a, **kw): pass
+    async def notify_low_volatility(*a, **kw): pass
+
+# Pilier 2 : ATR Range Builder + WebSocket
+try:
+    from atr_range_builder import ATRRangeSelector, RangeBarBuilder
+    from ws_manager import TradovateWSManager
+    PILIER_WS = True
+except ImportError:
+    PILIER_WS = False
+    logging.warning("ws_manager.py / atr_range_builder.py introuvables — WS désactivé.")
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ---------------------------------------------------------------------------
 # Import Labouchere tracker (module local existant)
 # ---------------------------------------------------------------------------
 try:
@@ -601,16 +640,25 @@ async def cme_time_watcher():
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup & shutdown."""
-    logger.info("=== Apex Tradovate Bot démarrage ===")
+    """Startup & shutdown — 5 piliers techniques actifs."""
+    logger.info("=== Apex Tradovate Bot démarrage (5 piliers actifs) ===")
 
-    # Vérifications de config
-    missing = []
-    for var in ["TRADOVATE_USERNAME", "TRADOVATE_PASSWORD", "TRADOVATE_ACCOUNT_SPEC", "APEX_WEBHOOK_TOKEN"]:
-        if not os.getenv(var):
-            missing.append(var)
+    # ── Pilier 3 : Vérification variables d'env ──────────────────────────────
+    required_vars = ["TRADOVATE_USERNAME", "TRADOVATE_PASSWORD", "TRADOVATE_ACCOUNT_SPEC", "APEX_WEBHOOK_TOKEN"]
+    missing = [v for v in required_vars if not os.getenv(v)]
     if missing:
         logger.warning(f"Variables d'env manquantes : {missing}")
+
+    # ── Pilier 1 : Restaurer l'état persisté (survit aux redémarrages Railway) ─
+    saved = state_manager.load()
+    if saved:
+        bot_state.daily_pnl    = saved.get("daily_pnl", 0.0)
+        bot_state.peak_equity  = saved.get("peak_equity", 50000.0)
+        bot_state.total_profit = saved.get("total_profit", 0.0)
+        logger.info(
+            f"État restauré — daily_pnl={bot_state.daily_pnl:.2f}$ "
+            f"peak={bot_state.peak_equity:.2f}$ total={bot_state.total_profit:.2f}$"
+        )
 
     # Auth initiale
     if DRY_RUN:
@@ -618,19 +666,35 @@ async def lifespan(app: FastAPI):
     ok = await tradovate_client.auth()
     if ok:
         logger.info("Connexion Tradovate etablie.")
+        await notify("🟢 Apex NQ Bot démarré — Tradovate connecté.")  # Pilier 4
     else:
         if DRY_RUN:
             logger.warning("Auth Tradovate echouee mais DRY_RUN=true — simulation uniquement.")
         else:
             logger.error("ATTENTION : Connexion Tradovate echouee au demarrage !")
+            await notify("🔴 Auth Tradovate ÉCHOUÉE au démarrage !", urgent=True)  # Pilier 4
 
     # Démarrer le watcher CME
     watcher_task = asyncio.create_task(cme_time_watcher())
 
-    yield  # app running
+    yield  # ── app running ──
 
-    # Shutdown
+    # ── Shutdown ─────────────────────────────────────────────────────────────
     logger.info("=== Arrêt du bot ===")
+
+    # ── Pilier 4 : Notifier le redémarrage ───────────────────────────────────
+    await notify("🟠 Bot arrêté — redémarrage Railway probable.")
+
+    # ── Pilier 1 : Sauvegarder l'état avant arrêt ────────────────────────────
+    state_manager.save({
+        "daily_pnl":      bot_state.daily_pnl,
+        "peak_equity":    bot_state.peak_equity,
+        "total_profit":   bot_state.total_profit,
+        "trading_halted": bot_state.trading_halted,
+        "halt_reason":    bot_state.halt_reason,
+    })
+    logger.info("État sauvegardé avant arrêt (Pilier 1).")
+
     watcher_task.cancel()
     try:
         await watcher_task
@@ -670,8 +734,21 @@ class TradingViewSignal(BaseModel):
 
 @app.get("/health")
 async def health():
-    """Healthcheck basique."""
-    return {"status": "ok", "timestamp": datetime.now(TZ_PARIS).isoformat()}
+    """
+    Pilier 5 — Health Check.
+    Railway utilise cet endpoint pour vérifier que le bot est vivant.
+    Répond toujours HTTP 200 si le process tourne (même si auth KO).
+    Détails complets disponibles sur /status.
+    """
+    return {
+        "status":         "ok",
+        "bot_alive":      True,
+        "dry_run":        DRY_RUN,
+        "authenticated":  bool(bot_state.access_token),
+        "trading_halted": bot_state.trading_halted,
+        "daily_pnl":      round(bot_state.daily_pnl, 2),
+        "timestamp":      datetime.now(TZ_PARIS).isoformat(),
+    }
 
 
 @app.get("/status")
