@@ -723,9 +723,61 @@ class TradingViewSignal(BaseModel):
     price: float
     sl: Optional[float] = None
     tp: Optional[float] = None
+    tp1: Optional[float] = None
+    tp2: Optional[float] = None
     tf: Optional[int] = None
     strategy: Optional[str] = None
     token: Optional[str] = None  # token optionnel dans le body (TradingView)
+    close_reason: Optional[str] = None    # "TP1" | "TP2" | "SL" | "signal"
+    # Champs rapport d'ordre
+    atr: Optional[float] = None            # ATR au moment du signal
+    hma20: Optional[float] = None          # Hull MA 20
+    range_size: Optional[float] = None     # Taille du range (high - low bougie)
+    avg_level: Optional[float] = None      # Moyenne des hauts (SELL) ou des bas (BUY)
+
+
+# ---------------------------------------------------------------------------
+# Registre des ordres (pour endpoint /orders/recent + cron notification)
+# ---------------------------------------------------------------------------
+import uuid
+from dataclasses import dataclass, field, asdict
+
+@dataclass
+class BotOrderRecord:
+    id: str
+    timestamp: str
+    event: str            # "open" | "close"
+    action: str           # "Buy" | "Sell" | "Close"
+    symbol: str
+    qty: int
+    price: float
+    bet_usd: float
+    dry_run: bool
+    strategy: str = ""
+    # Indicateurs
+    sl: float = 0.0
+    tp1: float = 0.0
+    tp2: float = 0.0
+    atr: float = 0.0
+    hma20: float = 0.0
+    range_size: float = 0.0
+    avg_level: float = 0.0
+    # Fermeture
+    close_reason: str = ""
+    exit_price: float = 0.0
+    pnl_usd: float = 0.0
+    pnl_pts: float = 0.0
+    notified: bool = False
+
+# Liste en mémoire — max 200 enregistrements
+_order_log: list[BotOrderRecord] = []
+_order_log_lock = asyncio.Lock()
+
+async def _log_order(record: BotOrderRecord):
+    async with _order_log_lock:
+        _order_log.append(record)
+        if len(_order_log) > 200:
+            _order_log.pop(0)
 
 
 # ---------------------------------------------------------------------------
@@ -854,10 +906,11 @@ async def webhook_apex(
 
     # 3. Action CLOSE
     if action == "close":
+        close_label = f"Signal TradingView CLOSE ({signal.close_reason or 'signal'})"
         background_tasks.add_task(
-            _execute_close, reason="Signal TradingView CLOSE"
+            _execute_close, reason=close_label, signal=signal
         )
-        return {"status": "ok", "action": "close", "message": "Fermeture en cours."}
+        return {"status": "ok", "action": "close", "message": "Fermeture en cours.", "reason": signal.close_reason or "signal"}
 
     # 4. Action BUY / SELL
     if action not in ("buy", "sell"):
@@ -916,6 +969,7 @@ async def webhook_apex(
         contracts,
         signal.price,
         bet_usd,
+        signal,   # rapport complet
     )
 
     return {
@@ -932,8 +986,83 @@ async def webhook_apex(
 # ---------------------------------------------------------------------------
 # Fonctions d'exécution asynchrones (background tasks)
 # ---------------------------------------------------------------------------
+def _format_order_report(
+    action: str, symbol: str, qty: int, fill_price: float,
+    bet_usd: float, signal: "TradingViewSignal", dry_run: bool = False
+) -> str:
+    """Génère le rapport texte pour un ordre exécuté."""
+    direction = "🟢 BUY" if action == "Buy" else "🔴 SELL"
+    mode_tag  = " [DRY]" if dry_run else ""
+    sep       = "─" * 32
+
+    sl_line  = f"  SL        : {signal.sl:.2f}" if signal.sl else "  SL        : —"
+    tp1_val  = signal.tp1 or signal.tp
+    tp1_line = f"  TP1       : {tp1_val:.2f}" if tp1_val else "  TP1       : —"
+    tp2_line = f"  TP2       : {signal.tp2:.2f}" if signal.tp2 else "  TP2       : —"
+    atr_line = f"  ATR       : {signal.atr:.2f}" if signal.atr else "  ATR       : —"
+    hma_line = f"  HMA 20    : {signal.hma20:.2f}" if signal.hma20 else "  HMA 20    : —"
+    rng_line = f"  Range     : {signal.range_size:.2f}" if signal.range_size else "  Range     : —"
+    avg_label = "Moy. bas  " if action == "Buy" else "Moy. hauts"
+    avg_line  = f"  {avg_label} : {signal.avg_level:.2f}" if signal.avg_level else f"  {avg_label} : —"
+
+    lab_state = ""
+    if LAB_AVAILABLE:
+        try:
+            from apex_lab_tracker import get_lab_state
+            st = get_lab_state()
+            lab_state = (
+                f"  Séquence  : {st.get('sequence', [])}\n"
+                f"  Mise      : ${bet_usd:.0f} ({qty} contrats)\n"
+                f"  Cycle     : #{st.get('cycle', 1)}  Trades : {st.get('total_trades', 0)}\n"
+                f"  Win/Loss  : {st.get('wins', 0)}W / {st.get('losses', 0)}L\n"
+            )
+        except Exception:
+            lab_state = f"  Mise      : ${bet_usd:.0f} ({qty} contrats)\n"
+    else:
+        lab_state = f"  Mise      : ${bet_usd:.0f} ({qty} contrats)\n"
+
+    report = (
+        f"\n{sep}\n"
+        f"📊 RAPPORT ORDRE{mode_tag}\n"
+        f"{sep}\n"
+        f"  {direction}  {qty}x {symbol}\n"
+        f"  Entrée    : {fill_price:.2f}\n"
+        f"{sep}\n"
+        f"  NIVEAUX\n"
+        f"{sl_line}\n"
+        f"{tp1_line}\n"
+        f"{tp2_line}\n"
+        f"{sep}\n"
+        f"  INDICATEURS\n"
+        f"{atr_line}\n"
+        f"{hma_line}\n"
+        f"{rng_line}\n"
+        f"{avg_line}\n"
+        f"{sep}\n"
+        f"  LABOUCHERE\n"
+        f"{lab_state}"
+        f"{sep}\n"
+        f"  Stratégie : {signal.strategy or '—'}\n"
+        f"{sep}"
+    )
+    return report
+
+
+async def _send_notify(report: str):
+    """Envoie le rapport vers NOTIFY_WEBHOOK_URL si configuré."""
+    notify_url = os.getenv("NOTIFY_WEBHOOK_URL", "")
+    if not notify_url:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as cli:
+            await cli.post(notify_url, json={"message": report}, headers={"Content-Type": "application/json"})
+    except Exception as e:
+        logger.warning(f"Notification échouée : {e}")
+
+
 async def _execute_order(
-    action: str, symbol: str, qty: int, price: float, bet_usd: float
+    action: str, symbol: str, qty: int, price: float, bet_usd: float,
+    signal: "TradingViewSignal" = None,
 ):
     """Place un ordre Market au prix du marché (pas Limit — évite les ordres hors marché)."""
     async with bot_state.order_lock:
@@ -943,10 +1072,24 @@ async def _execute_order(
                 bot_state.current_position_qty = qty if action == "Buy" else -qty
                 bot_state.current_position_symbol = symbol
                 bot_state.current_position_price = price
+                if signal:
+                    report = _format_order_report(action, symbol, qty, price, bet_usd, signal, dry_run=True)
+                    logger.info(report)
+                    await _send_notify(report)
+                    rec = BotOrderRecord(
+                        id=str(uuid.uuid4())[:8], event="open",
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        action=action, symbol=symbol, qty=qty, price=price,
+                        bet_usd=bet_usd, dry_run=True,
+                        strategy=signal.strategy or "",
+                        sl=signal.sl or 0, tp1=signal.tp1 or signal.tp or 0, tp2=signal.tp2 or 0,
+                        atr=signal.atr or 0, hma20=signal.hma20 or 0,
+                        range_size=signal.range_size or 0, avg_level=signal.avg_level or 0,
+                    )
+                    await _log_order(rec)
                 return
 
             # Ordre MARKET — exécution immédiate au meilleur prix disponible
-            # (un ordre Limit avec le prix TradingView serait hors marché si décalé)
             result = await tradovate_client.place_market_order(
                 action=action,
                 symbol=symbol,
@@ -958,19 +1101,105 @@ async def _execute_order(
                 bot_state.current_position_qty  = qty if action == "Buy" else -qty
                 bot_state.current_position_symbol = symbol
                 bot_state.current_position_price  = fill_price
+                if signal:
+                    report = _format_order_report(action, symbol, qty, fill_price, bet_usd, signal)
+                    logger.info(report)
+                    await _send_notify(report)
+                    rec = BotOrderRecord(
+                        id=str(uuid.uuid4())[:8], event="open",
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        action=action, symbol=symbol, qty=qty, price=fill_price,
+                        bet_usd=bet_usd, dry_run=False,
+                        strategy=signal.strategy or "",
+                        sl=signal.sl or 0, tp1=signal.tp1 or signal.tp or 0, tp2=signal.tp2 or 0,
+                        atr=signal.atr or 0, hma20=signal.hma20 or 0,
+                        range_size=signal.range_size or 0, avg_level=signal.avg_level or 0,
+                    )
+                    await _log_order(rec)
             else:
                 logger.error(f"❌ Ordre non exécuté : {action} {qty}x {symbol}")
         except Exception as e:
             logger.error(f"Erreur _execute_order : {e}\n{traceback.format_exc()}")
 
 
-async def _execute_close(reason: str = "Close signal"):
+def _format_close_report(
+    symbol: str, qty: int, entry: float, exit_price: float,
+    pnl_usd: float, pnl_pts: float, close_reason: str,
+    bet_usd: float, dry_run: bool = False
+) -> str:
+    """Génère le rapport texte pour une clôture."""
+    mode_tag = " [DRY]" if dry_run else ""
+    sep = "─" * 32
+    pnl_emoji = "✅" if pnl_usd >= 0 else "❌"
+    pnl_sign  = "+" if pnl_usd >= 0 else ""
+    pts_sign  = "+" if pnl_pts >= 0 else ""
+
+    reason_map = {
+        "TP1": "🎯 TP1 atteint",
+        "TP2": "🎯🎯 TP2 atteint",
+        "SL":  "🛑 SL touché",
+        "CME": "⏰ Force-close CME",
+    }
+    reason_label = reason_map.get(close_reason.upper() if close_reason else "", f"📤 {close_reason or 'Signal close'}")
+
+    return (
+        f"\n{sep}\n"
+        f"📋 RÉSULTAT POSITION{mode_tag}\n"
+        f"{sep}\n"
+        f"  {reason_label}\n"
+        f"  Symbole   : {symbol}  x{qty}\n"
+        f"  Entrée    : {entry:.2f}\n"
+        f"  Sortie    : {exit_price:.2f}\n"
+        f"  Points    : {pts_sign}{pnl_pts:.2f} pts\n"
+        f"  PnL       : {pnl_emoji} {pnl_sign}{pnl_usd:.2f} $\n"
+        f"  Mise      : {bet_usd:.0f} $\n"
+        f"{sep}"
+    )
+
+
+async def _execute_close(reason: str = "Close signal", signal: "TradingViewSignal" = None):
     """Ferme toutes les positions et met a jour le Labouchere."""
     async with bot_state.order_lock:
         try:
+            close_reason = ""
+            exit_price_tv = signal.price if signal else 0.0
+            if signal:
+                close_reason = (signal.close_reason or signal.strategy or "signal").upper()
+
             if DRY_RUN:
-                if bot_state.current_position_qty != 0:
-                    logger.info(f"[DRY_RUN] CLOTURE SIMULEE : {bot_state.current_position_symbol} qty={bot_state.current_position_qty} raison={reason}")
+                qty_open = bot_state.current_position_qty
+                if qty_open != 0:
+                    entry   = bot_state.current_position_price or 0.0
+                    exit_p  = exit_price_tv or entry
+                    sym     = bot_state.current_position_symbol or CONTRACT_SYMBOL
+                    # PnL estimé (direction dépend de Buy/Sell)
+                    direction = 1 if qty_open > 0 else -1
+                    pnl_pts = (exit_p - entry) * direction
+                    pnl_usd = pnl_pts * abs(qty_open) * MNQ_POINT_VALUE
+
+                    report = _format_close_report(
+                        sym, abs(qty_open), entry, exit_p,
+                        pnl_usd, pnl_pts, close_reason, UNIT_DOLLAR, dry_run=True
+                    )
+                    logger.info(report)
+                    await _send_notify(report)
+
+                    rec = BotOrderRecord(
+                        id=str(uuid.uuid4())[:8], event="close",
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        action="Close", symbol=sym, qty=abs(qty_open),
+                        price=entry, bet_usd=UNIT_DOLLAR, dry_run=True,
+                        strategy=signal.strategy if signal else "",
+                        close_reason=close_reason,
+                        exit_price=exit_p, pnl_usd=pnl_usd, pnl_pts=pnl_pts,
+                    )
+                    await _log_order(rec)
+
+                    if LAB_AVAILABLE:
+                        if pnl_usd >= 0:
+                            record_win(pnl_usd)
+                        else:
+                            record_loss(abs(pnl_usd))
                 else:
                     logger.info("[DRY_RUN] Pas de position ouverte a fermer.")
                 bot_state.current_position_qty = 0
@@ -998,6 +1227,28 @@ async def _execute_close(reason: str = "Close signal"):
                 if result:
                     logger.info(f"Position fermee : {symbol} pnl={trade_pnl:.2f}$")
 
+                    # Rapport fermeture
+                    entry_p = bot_state.current_position_price or pos.get("netPrice", 0)
+                    exit_p  = exit_price_tv or entry_p
+                    direction = 1 if net_pos > 0 else -1
+                    pnl_pts = (exit_p - entry_p) * direction if exit_p else 0.0
+                    report_close = _format_close_report(
+                        symbol, qty, entry_p, exit_p,
+                        trade_pnl, pnl_pts, close_reason, UNIT_DOLLAR
+                    )
+                    logger.info(report_close)
+                    await _send_notify(report_close)
+                    rec = BotOrderRecord(
+                        id=str(uuid.uuid4())[:8], event="close",
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        action="Close", symbol=symbol, qty=qty,
+                        price=entry_p, bet_usd=UNIT_DOLLAR, dry_run=False,
+                        strategy=signal.strategy if signal else "",
+                        close_reason=close_reason,
+                        exit_price=exit_p, pnl_usd=trade_pnl, pnl_pts=pnl_pts,
+                    )
+                    await _log_order(rec)
+
                     if LAB_AVAILABLE:
                         if trade_pnl >= 0:
                             record_win(trade_pnl)
@@ -1013,6 +1264,40 @@ async def _execute_close(reason: str = "Close signal"):
 
         except Exception as e:
             logger.error(f"Erreur _execute_close : {e}\n{traceback.format_exc()}")
+
+
+# ---------------------------------------------------------------------------
+# Endpoint /orders/recent — consulté par le cron de notification WhatsApp
+# ---------------------------------------------------------------------------
+@app.get("/orders/recent")
+async def orders_recent(since: Optional[str] = None, limit: int = 50):
+    """
+    Retourne les derniers ordres enregistrés.
+    since : ISO timestamp (optionnel) — ne retourne que les ordres après cette date
+    limit : nombre max d'entrées (défaut 50)
+    """
+    async with _order_log_lock:
+        orders = list(_order_log)
+
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            orders = [o for o in orders if datetime.fromisoformat(o.timestamp) > since_dt]
+        except Exception:
+            pass
+
+    orders = orders[-limit:]
+    return {"count": len(orders), "orders": [asdict(o) for o in orders]}
+
+
+@app.post("/orders/mark-notified")
+async def orders_mark_notified(ids: list[str]):
+    """Marque des ordres comme notifiés (appelé par le cron après envoi WhatsApp)."""
+    async with _order_log_lock:
+        for o in _order_log:
+            if o.id in ids:
+                o.notified = True
+    return {"ok": True, "marked": len(ids)}
 
 
 # ---------------------------------------------------------------------------
