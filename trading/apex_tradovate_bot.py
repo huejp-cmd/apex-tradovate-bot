@@ -935,7 +935,7 @@ async def webhook_apex(
 async def _execute_order(
     action: str, symbol: str, qty: int, price: float, bet_usd: float
 ):
-    """Place un ordre Limit et gere le resultat Labouchere."""
+    """Place un ordre Market au prix du marché (pas Limit — évite les ordres hors marché)."""
     async with bot_state.order_lock:
         try:
             if DRY_RUN:
@@ -945,18 +945,21 @@ async def _execute_order(
                 bot_state.current_position_price = price
                 return
 
-            result = await tradovate_client.place_order(
+            # Ordre MARKET — exécution immédiate au meilleur prix disponible
+            # (un ordre Limit avec le prix TradingView serait hors marché si décalé)
+            result = await tradovate_client.place_market_order(
                 action=action,
                 symbol=symbol,
                 qty=qty,
-                price=price,
             )
             if result:
-                logger.info(f"Ordre execute : {action} {qty} {symbol} @ {price}")
-                bot_state.current_position_qty = qty if action == "Buy" else -qty
+                fill_price = result.get("price", price)
+                logger.info(f"✅ Ordre MARKET exécuté : {action} {qty}x {symbol} @ {fill_price} (bet=${bet_usd:.0f})")
+                bot_state.current_position_qty  = qty if action == "Buy" else -qty
                 bot_state.current_position_symbol = symbol
+                bot_state.current_position_price  = fill_price
             else:
-                logger.error("Ordre non execute.")
+                logger.error(f"❌ Ordre non exécuté : {action} {qty}x {symbol}")
         except Exception as e:
             logger.error(f"Erreur _execute_order : {e}\n{traceback.format_exc()}")
 
