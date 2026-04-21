@@ -7,3 +7,4 @@ numpy>=1.24.0
 # Piliers techniques (ajout 2026-04-21)
 websockets>=12.0          # Pilier 2 : WebSocket reconnexion automatique
 redis>=5.0.0              # Pilier 1 : Persistance Redis (optionnel, fallback JSON)
+# cache-bust: 1776769340
