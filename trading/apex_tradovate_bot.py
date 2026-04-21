@@ -19,9 +19,11 @@ import asyncio
 import logging
 import os
 import traceback
+import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, BackgroundTasks
@@ -739,8 +741,7 @@ class TradingViewSignal(BaseModel):
 # ---------------------------------------------------------------------------
 # Registre des ordres (pour endpoint /orders/recent + cron notification)
 # ---------------------------------------------------------------------------
-import uuid
-from dataclasses import dataclass, field, asdict
+# (uuid + dataclasses importés en haut du fichier)
 
 @dataclass
 class BotOrderRecord:
@@ -770,7 +771,7 @@ class BotOrderRecord:
     notified: bool = False
 
 # Liste en mémoire — max 200 enregistrements
-_order_log: list[BotOrderRecord] = []
+_order_log: List[BotOrderRecord] = []
 _order_log_lock = asyncio.Lock()
 
 async def _log_order(record: BotOrderRecord):
