@@ -115,16 +115,20 @@ CONTRACT_SYMBOL = os.getenv("CONTRACT_SYMBOL", "MNQ")
 UNIT_DOLLAR = float(os.getenv("UNIT_DOLLAR", "50"))
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() in ("1", "true", "yes")
 
-# Règles Apex ($50k evaluation)
-APEX_PROFIT_TARGET = 3000.0
-APEX_MAX_DAILY_LOSS = 2500.0
-APEX_TRAILING_DRAWDOWN = 2500.0
-APEX_CONSISTENCY_MAX_DAY_PCT = 0.30  # 30% du profit total max en 1 journée
+# ── Règles TopStep 50K Combine ──────────────────────────────────────────────
+# Ces valeurs reflètent les règles TopStep "No Activation Fee" 50K.
+# Référence : https://topstep.com — vérifier si les règles changent.
+APEX_PROFIT_TARGET        = float(os.getenv("PROFIT_TARGET",        "3000.0"))  # $3 000 objectif
+APEX_MAX_DAILY_LOSS       = float(os.getenv("MAX_DAILY_LOSS",       "1000.0"))  # $1 000 perte max/jour
+APEX_TRAILING_DRAWDOWN    = float(os.getenv("MAX_TRAILING_DRAWDOWN","2000.0"))  # $2 000 drawdown total
+MAX_CONTRACTS             = int(os.getenv("MAX_CONTRACTS",          "5"))        # 5 MNQ max
+APEX_CONSISTENCY_MAX_DAY_PCT = 0.30  # 30% du profit total max en 1 journée (règle PA)
 
-# Heure de force-close NQ/MNQ : 15h55 ET (5 min avant cloture CME 16h00)
-# Pour METH/ETH : 22h45 Paris
-CME_FORCE_CLOSE_HOUR = int(os.getenv("FORCE_CLOSE_HOUR_ET", "15"))
-CME_FORCE_CLOSE_MINUTE = int(os.getenv("FORCE_CLOSE_MIN_ET", "55"))
+# ── Fermeture EOD (End Of Day) ───────────────────────────────────────────────
+# MNQ/NQ : fermeture forcée à 15h45 CT = 16h45 ET (15 min avant close CME 16h00 ET)
+# Pas de positions overnight ni weekend.
+CME_FORCE_CLOSE_HOUR   = int(os.getenv("FORCE_CLOSE_HOUR_ET", "15"))
+CME_FORCE_CLOSE_MINUTE = int(os.getenv("FORCE_CLOSE_MIN_ET",  "45"))
 
 # MNQ : $2 par point, SL fixe 9 points, TP fixe 18 points
 MNQ_POINT_VALUE = 2.0
@@ -443,29 +447,32 @@ class CMEGuard:
     def _now_paris(self) -> datetime:
         return datetime.now(TZ_PARIS)
 
+    def _now_et(self) -> datetime:
+        return datetime.now(ZoneInfo("America/New_York"))
+
     def is_trading_allowed(self) -> tuple[bool, str]:
         """
-        Retourne (allowed: bool, reason: str).
-        Blackout :
-          - Vendredi 22h45 → Dimanche 23h59 Paris
-          - Chaque jour après 22h45 Paris
+        Règles TopStep 50K / CME NQ :
+          - Fermeture forcée avant 15h45 ET (buffer 15 min avant close RTH 16h00 ET)
+          - Blackout weekend : vendredi après 16h00 ET → dimanche 18h00 ET
+          - Journées fériées US : pas de blackout automatique (gérer manuellement)
         """
-        now = self._now_paris()
-        weekday = now.weekday()  # 0=lundi, 4=vendredi, 5=samedi, 6=dimanche
+        now_et  = self._now_et()
+        weekday = now_et.weekday()  # 0=lundi … 4=vendredi, 5=samedi, 6=dimanche
 
-        # Blackout weekend
-        if weekday == 4 and (now.hour > 22 or (now.hour == 22 and now.minute >= 45)):
-            return False, "Blackout weekend — vendredi après 22h45 Paris"
+        # Blackout weekend (heure ET)
+        if weekday == 4 and (now_et.hour > 16 or (now_et.hour == 16 and now_et.minute >= 0)):
+            return False, "Blackout weekend — vendredi après 16h00 ET"
         if weekday == 5:
             return False, "Blackout weekend — samedi"
-        if weekday == 6 and not (now.hour == 23 and now.minute == 59):
-            return False, "Blackout weekend — dimanche avant 23h59 Paris"
+        if weekday == 6 and (now_et.hour < 18):
+            return False, "Blackout weekend — dimanche avant 18h00 ET (ouverture Globex)"
 
-        # Force-close journalier
-        if now.hour > CME_FORCE_CLOSE_HOUR or (
-            now.hour == CME_FORCE_CLOSE_HOUR and now.minute >= CME_FORCE_CLOSE_MINUTE
+        # Force-close EOD : avant 15h45 ET (= avant 16h00 RT CME, buffer 15 min)
+        if now_et.hour > CME_FORCE_CLOSE_HOUR or (
+            now_et.hour == CME_FORCE_CLOSE_HOUR and now_et.minute >= CME_FORCE_CLOSE_MINUTE
         ):
-            return False, f"Après {CME_FORCE_CLOSE_HOUR}h{CME_FORCE_CLOSE_MINUTE:02d} Paris — CME bientôt fermé"
+            return False, f"EOD TopStep — après {CME_FORCE_CLOSE_HOUR}h{CME_FORCE_CLOSE_MINUTE:02d} ET (close CME 16h00)"
 
         return True, "OK"
 
@@ -591,6 +598,8 @@ def calculate_contracts(bet_usd: float, price: float = 0.0, sl: float = 0.0) -> 
     contracts = max(1, int(bet_usd / sl_value_per_contract))
     max_contracts = max(1, int(max_risk / sl_value_per_contract))
     contracts = min(contracts, max_contracts)
+    # Règle TopStep : jamais plus de MAX_CONTRACTS simultanément
+    contracts = min(contracts, MAX_CONTRACTS)
 
     logger.info(
         f"Sizing [{symbol}] : bet={bet_usd:.0f}$ | "
