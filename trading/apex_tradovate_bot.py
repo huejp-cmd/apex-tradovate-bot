@@ -27,7 +27,7 @@ from typing import List, Optional
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
 from zoneinfo import ZoneInfo
 
@@ -1313,6 +1313,149 @@ def _verify_token(token: Optional[str]):
             status_code=401,
             detail="Token webhook invalide. Ajouter le header X-Webhook-Token.",
         )
+
+
+# ---------------------------------------------------------------------------
+# Dashboard HTML — mis à jour toutes les 10s
+# ---------------------------------------------------------------------------
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    from fastapi.responses import HTMLResponse
+    st = await get_status()
+    bot  = st.get("bot", {})
+    pnl  = st.get("pnl", {})
+    lab  = st.get("labouchere", {})
+    pos  = st.get("positions", [])
+    t    = st.get("time_paris", "")
+
+    # Couleurs
+    auth_color  = "#00e676" if bot.get("authenticated") else "#ff5252"
+    halt_color  = "#ff5252" if bot.get("trading_halted") else "#00e676"
+    pnl_color   = "#00e676" if pnl.get("daily_pnl", 0) >= 0 else "#ff5252"
+    cum_color   = "#00e676" if lab.get("cum_pnl", 0) >= 0 else "#ff5252"
+
+    # Historique ordres
+    orders_data = []
+    try:
+        from collections import deque
+        orders_data = list(_order_log)[-20:]
+    except Exception:
+        pass
+
+    rows = ""
+    for o in reversed(orders_data):
+        pnl_val = getattr(o, "pnl_usd", None)
+        pnl_str = f"${pnl_val:+.0f}" if pnl_val is not None else "—"
+        pnl_c = "#00e676" if (pnl_val or 0) > 0 else ("#ff5252" if (pnl_val or 0) < 0 else "#aaa")
+        side_icon = "▲" if getattr(o, "side", "") == "buy" else "▼"
+        side_c = "#00e676" if getattr(o, "side", "") == "buy" else "#ff5252"
+        status_str = getattr(o, "status", "")
+        ts = str(getattr(o, "timestamp", ""))[:16].replace("T", " ")
+        rows += f"""
+        <tr>
+          <td style='color:#aaa'>{ts}</td>
+          <td style='color:{side_c}'>{side_icon} {getattr(o,'side','').upper()}</td>
+          <td>{getattr(o,'qty','')}x {getattr(o,'symbol','')}</td>
+          <td>${getattr(o,'price',0):.0f}</td>
+          <td style='color:{"#00e676" if status_str=="filled" else "#ff9800"}'>{status_str}</td>
+          <td style='color:{pnl_c};font-weight:bold'>{pnl_str}</td>
+        </tr>"""
+
+    seq_str = " + ".join(str(x) for x in lab.get("sequence", []))
+    bet = lab.get("risk_trade_usd", 0)
+
+    html = f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta http-equiv="refresh" content="10"/>
+  <title>Apex NQ Bot — Dashboard</title>
+  <style>
+    * {{ box-sizing:border-box; margin:0; padding:0 }}
+    body {{ background:#0d1117; color:#e6edf3; font-family:'Segoe UI',sans-serif; padding:16px }}
+    h1 {{ color:#58a6ff; margin-bottom:16px; font-size:1.3rem }}
+    .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:16px }}
+    .card {{ background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px }}
+    .card .label {{ color:#8b949e; font-size:.75rem; margin-bottom:4px }}
+    .card .value {{ font-size:1.25rem; font-weight:700 }}
+    .section {{ background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px; margin-bottom:16px }}
+    .section h2 {{ color:#58a6ff; font-size:.9rem; margin-bottom:12px }}
+    table {{ width:100%; border-collapse:collapse; font-size:.82rem }}
+    th {{ color:#8b949e; text-align:left; padding:4px 8px; border-bottom:1px solid #30363d }}
+    td {{ padding:5px 8px; border-bottom:1px solid #21262d }}
+    .seq {{ background:#21262d; border-radius:4px; padding:6px 10px; font-family:monospace; color:#79c0ff; font-size:1rem }}
+    .footer {{ color:#8b949e; font-size:.72rem; margin-top:8px }}
+  </style>
+</head>
+<body>
+  <h1>🤖 Apex NQ Bot — Live Dashboard</h1>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">Authentifié</div>
+      <div class="value" style="color:{auth_color}">{"✅ OUI" if bot.get("authenticated") else "❌ NON"}</div>
+    </div>
+    <div class="card">
+      <div class="label">Trading</div>
+      <div class="value" style="color:{halt_color}">{"⛔ HALT" if bot.get("trading_halted") else "✅ ACTIF"}</div>
+    </div>
+    <div class="card">
+      <div class="label">P&L Jour</div>
+      <div class="value" style="color:{pnl_color}">${pnl.get("daily_pnl",0):+.0f}</div>
+    </div>
+    <div class="card">
+      <div class="label">P&L Cumulé</div>
+      <div class="value" style="color:{cum_color}">${lab.get("cum_pnl",0):+.0f}</div>
+    </div>
+    <div class="card">
+      <div class="label">Drawdown restant</div>
+      <div class="value" style="color:#ff9800">${pnl.get("trailing_drawdown_remaining",0):.0f}</div>
+    </div>
+    <div class="card">
+      <div class="label">Limite jour restante</div>
+      <div class="value" style="color:#ff9800">${pnl.get("max_daily_loss_remaining",0):.0f}</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>📊 Labouchere</h2>
+    <div style="margin-bottom:10px">
+      <span class="label" style="color:#8b949e;font-size:.75rem">Séquence active : </span>
+      <span class="seq">[{seq_str}]</span>
+      <span style="color:#79c0ff;margin-left:12px;font-weight:700">Mise = ${bet:.0f}</span>
+    </div>
+    <div class="grid" style="margin-bottom:0">
+      <div class="card">
+        <div class="label">Wins / Losses</div>
+        <div class="value" style="color:#e6edf3">{lab.get("wins",0)}W / {lab.get("losses",0)}L</div>
+      </div>
+      <div class="card">
+        <div class="label">Win Rate</div>
+        <div class="value" style="color:{'#00e676' if lab.get('win_rate',0)>=50 else '#ff9800'}">{lab.get("win_rate",0):.0f}%</div>
+      </div>
+      <div class="card">
+        <div class="label">Cycles</div>
+        <div class="value">{lab.get("cycles",0)}</div>
+      </div>
+      <div class="card">
+        <div class="label">Compte</div>
+        <div class="value" style="color:#8b949e;font-size:.9rem">{bot.get("account_spec","—")}</div>
+      </div>
+    </div>
+  </div>
+
+  {"<div class='section'><h2>📈 Position ouverte</h2><p style='color:#ff9800'>"+str(pos[0])+"</p></div>" if pos else ""}
+
+  <div class="section">
+    <h2>📋 Historique ordres récents</h2>
+    {"<p style='color:#8b949e;font-size:.82rem'>Aucun ordre enregistré</p>" if not rows else f"<table><thead><tr><th>Heure</th><th>Sens</th><th>Qté</th><th>Prix</th><th>Statut</th><th>P&L</th></tr></thead><tbody>{rows}</tbody></table>"}
+  </div>
+
+  <div class="footer">⟳ Actualisation auto toutes les 10s — {t}</div>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 
 # ---------------------------------------------------------------------------
