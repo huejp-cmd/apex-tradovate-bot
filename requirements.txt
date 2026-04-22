@@ -4,7 +4,4 @@ httpx>=0.27.0
 pydantic>=2.0.0
 python-dateutil>=2.8.2
 numpy>=1.24.0
-# Piliers techniques (ajout 2026-04-21)
-websockets>=12.0          # Pilier 2 : WebSocket reconnexion automatique
-redis>=5.0.0              # Pilier 1 : Persistance Redis (optionnel, fallback JSON)
-# cache-bust: 1776769340
+websockets>=12.0
